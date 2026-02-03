@@ -1,10 +1,14 @@
 // ignore_for_file: avoid_web_libraries_in_flutter
 
+import 'dart:async';
+import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:web/web.dart' as web;
 import 'package:serial/serial.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 void main() {
   runApp(const MyApp());
@@ -31,37 +35,101 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   SerialPort? _port;
+  bool _keepReading = false;
 
   final TextEditingController groupIdController = TextEditingController();
+  final List<String> terminalLines = [];
 
   final List<String> frequencies = ['923875000', '923375000', '924875000'];
-
   String selectedFrequency = '923875000';
+
   String status = 'Not connected';
 
-  /// -----------------------------
-  /// CONNECT SERIAL PORT
-  /// -----------------------------
+  late final MobileScannerController _scannerController;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _scannerController = MobileScannerController(
+      facing: CameraFacing.front,
+      detectionSpeed: DetectionSpeed.noDuplicates,
+      autoStart: false,
+      formats: const [BarcodeFormat.qrCode],
+    );
+  }
+
+  @override
+  void dispose() {
+    _scannerController.dispose();
+    groupIdController.dispose();
+    super.dispose();
+  }
+
+  // -----------------------------
+  // CONNECT SERIAL
+  // -----------------------------
   Future<void> connectPort() async {
     try {
       final port = await web.window.navigator.serial.requestPort().toDart;
       await port.open(baudRate: 9600).toDart;
 
       _port = port;
+      _keepReading = true;
+      _startReading(port);
 
       setState(() {
         status = 'Device connected';
+        terminalLines.add('> Connected to device');
       });
-    } catch (e) {
-      setState(() {
-        status = 'Connection failed';
-      });
+    } catch (_) {
+      setState(() => status = 'Connection failed');
     }
   }
 
-  /// -----------------------------
-  /// LOW-LEVEL WRITE (SAFE)
-  /// -----------------------------
+  // -----------------------------
+  // READ SERIAL
+  // -----------------------------
+  Future<void> _startReading(SerialPort port) async {
+    String buffer = '';
+
+    while (port.readable != null && _keepReading) {
+      final reader =
+          port.readable!.getReader() as web.ReadableStreamDefaultReader;
+
+      try {
+        while (_keepReading) {
+          final result = await reader.read().toDart;
+          if (result.done) break;
+
+          final value = result.value;
+          if (value != null && value.isA<JSUint8Array>()) {
+            final data = (value as JSUint8Array).toDart;
+            buffer += String.fromCharCodes(data);
+
+            final lines = buffer.split(RegExp(r'\r\n|\n|\r'));
+            buffer = lines.removeLast();
+
+            for (final line in lines) {
+              final clean = line.replaceAll(
+                RegExp(r'\x1B\[[0-9;]*[A-Za-z]'),
+                '',
+              );
+              setState(() => terminalLines.add(clean));
+            }
+          }
+        }
+      } catch (_) {
+        // ignore
+      } finally {
+        reader.releaseLock();
+      }
+    }
+  }
+
+  // -----------------------------
+  // WRITE SERIAL
+  // -----------------------------
   Future<void> _write(String text) async {
     final port = _port;
     if (port == null) return;
@@ -69,16 +137,16 @@ class _HomePageState extends State<HomePage> {
     final writer = port.writable?.getWriter();
     if (writer == null) return;
 
-    final data = Uint8List.fromList(text.codeUnits);
-
-    await writer.write(data.toJS).toDart;
-    await writer.close().toDart; // force flush
+    await writer.write(Uint8List.fromList(text.codeUnits).toJS).toDart;
+    await writer.close().toDart;
     writer.releaseLock();
+
+    setState(() => terminalLines.add('> $text'.trim()));
   }
 
-  /// -----------------------------
-  /// APPLY SETTINGS (ROBUST)
-  /// -----------------------------
+  // -----------------------------
+  // APPLY SETTINGS
+  // -----------------------------
   Future<void> applySettings() async {
     if (_port == null) {
       setState(() => status = 'No device connected');
@@ -86,58 +154,128 @@ class _HomePageState extends State<HomePage> {
     }
 
     final groupId = groupIdController.text.trim();
-
     if (groupId.isEmpty) {
       setState(() => status = 'Group ID required');
       return;
     }
 
     try {
-      // 1️⃣ Clear / wake up device (ENTER)
       await _write('\r\n');
       await Future.delayed(const Duration(milliseconds: 150));
 
-      // 2️⃣ Set Group ID
       await _write('rftag settings groupid set $groupId\r\n');
       await Future.delayed(const Duration(milliseconds: 150));
 
-      // 3️⃣ Set Frequency
       await _write('rftag settings lora freq $selectedFrequency\r\n');
 
+      setState(() => status = 'Commands sent');
+    } catch (_) {
+      setState(() => status = 'Failed to send commands');
+    }
+  }
+
+  // -----------------------------
+  // QR SCAN (JSON PARSE)
+  // -----------------------------
+  Future<void> _scanQr() async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scannerController.start();
+        });
+
+        return Dialog(
+          child: SizedBox(
+            width: 500,
+            height: 500,
+            child: Column(
+              children: [
+                const Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Text('Scan QR Code'),
+                ),
+                Expanded(
+                  child: MobileScanner(
+                    controller: _scannerController,
+                    onDetect: (capture) {
+                      for (final barcode in capture.barcodes) {
+                        final value = barcode.rawValue;
+                        if (value != null) {
+                          _scannerController.stop();
+                          Navigator.of(context).pop(value);
+                          break;
+                        }
+                      }
+                    },
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    _scannerController.stop();
+                    Navigator.of(context).pop();
+                  },
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (result == null) return;
+
+    try {
+      final Map<String, dynamic> data = jsonDecode(result);
+
+      final String groupId = data['groupId'].toString();
+
+      final double freqMHz = (data['loraConfig']['frequency'] as num)
+          .toDouble();
+
+      final String freqHz = (freqMHz * 1000000).round().toString();
+
       setState(() {
-        status = 'Settings sent successfully';
+        groupIdController.text = groupId;
+
+        if (!frequencies.contains(freqHz)) {
+          frequencies.add(freqHz);
+        }
+
+        selectedFrequency = freqHz;
+
+        terminalLines.add('> Scanned QR → groupId=$groupId freq=$freqHz');
       });
+
+      applySettings();
     } catch (e) {
       setState(() {
-        status = 'Failed to send commands';
+        terminalLines.add('> QR parse error: $e');
+        status = 'Invalid QR data';
       });
     }
   }
 
-  /// -----------------------------
-  /// UI
-  /// -----------------------------
+  // -----------------------------
+  // UI
+  // -----------------------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('RFTag Config'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.usb),
-            tooltip: 'Connect device',
-            onPressed: connectPort,
-          ),
+          IconButton(icon: const Icon(Icons.usb), onPressed: connectPort),
         ],
       ),
       body: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text('Status: $status'),
-
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             TextField(
               controller: groupIdController,
               decoration: const InputDecoration(
@@ -145,24 +283,52 @@ class _HomePageState extends State<HomePage> {
                 border: OutlineInputBorder(),
               ),
             ),
-
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             DropdownButtonFormField<String>(
-              value: selectedFrequency,
+              initialValue: selectedFrequency,
               items: frequencies
                   .map((f) => DropdownMenuItem(value: f, child: Text(f)))
                   .toList(),
               onChanged: (v) => setState(() => selectedFrequency = v!),
               decoration: const InputDecoration(
-                labelText: 'Frequency',
+                labelText: 'Frequency (Hz)',
                 border: OutlineInputBorder(),
               ),
             ),
-
-            const SizedBox(height: 24),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              onPressed: _scanQr,
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scan QR Code'),
+            ),
+            const SizedBox(height: 16),
             ElevatedButton(
               onPressed: applySettings,
               child: const Text('Apply Settings'),
+            ),
+            const SizedBox(height: 16),
+            const Text('Terminal'),
+            const SizedBox(height: 8),
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                ),
+                child: ListView(
+                  children: terminalLines
+                      .map(
+                        (line) => Text(
+                          line,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
             ),
           ],
         ),
