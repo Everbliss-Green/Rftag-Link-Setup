@@ -43,6 +43,13 @@ class _HomePageState extends State<HomePage> {
   final List<String> frequencies = ['923875000', '923375000', '924875000'];
   String selectedFrequency = '923875000';
 
+  final TextEditingController spreadingFactorController = TextEditingController(
+    text: '10',
+  );
+  final TextEditingController updateIntervalController = TextEditingController(
+    text: '60',
+  );
+
   String status = 'Not connected';
 
   late final MobileScannerController _scannerController;
@@ -63,6 +70,8 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _scannerController.dispose();
     groupIdController.dispose();
+    spreadingFactorController.dispose();
+    updateIntervalController.dispose();
     super.dispose();
   }
 
@@ -159,6 +168,9 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    final spreadingFactor = spreadingFactorController.text.trim();
+    final updateInterval = updateIntervalController.text.trim();
+
     try {
       await _write('\r\n');
       await Future.delayed(const Duration(milliseconds: 150));
@@ -167,6 +179,16 @@ class _HomePageState extends State<HomePage> {
       await Future.delayed(const Duration(milliseconds: 150));
 
       await _write('rftag settings lora freq $selectedFrequency\r\n');
+      await Future.delayed(const Duration(milliseconds: 150));
+
+      if (spreadingFactor.isNotEmpty) {
+        await _write('rftag settings lora sf $spreadingFactor\r\n');
+        await Future.delayed(const Duration(milliseconds: 150));
+      }
+
+      if (updateInterval.isNotEmpty) {
+        await _write('rftag settings timing interval $updateInterval\r\n');
+      }
 
       setState(() => status = 'Commands sent');
     } catch (_) {
@@ -231,10 +253,25 @@ class _HomePageState extends State<HomePage> {
 
       final String groupId = data['groupId'].toString();
 
-      final double freqMHz = (data['loraConfig']['frequency'] as num)
-          .toDouble();
+      final loraConfig = data['loraConfig'] as Map<String, dynamic>?;
 
+      final double freqMHz =
+          (loraConfig?['frequency'] as num?)?.toDouble() ?? 923.875;
       final String freqHz = (freqMHz * 1000000).round().toString();
+
+      // Parse spreading factor - handle both "SF10" format and numeric 10
+      String spreadingFactor = '10';
+      if (loraConfig?['spreading_factor'] != null) {
+        final sfValue = loraConfig!['spreading_factor'].toString();
+        // Remove "SF" prefix if present
+        spreadingFactor = sfValue.toUpperCase().replaceFirst('SF', '');
+      }
+
+      // Parse location update interval
+      String updateInterval = '60';
+      if (loraConfig?['location_update_interval'] != null) {
+        updateInterval = loraConfig!['location_update_interval'].toString();
+      }
 
       setState(() {
         groupIdController.text = groupId;
@@ -244,8 +281,12 @@ class _HomePageState extends State<HomePage> {
         }
 
         selectedFrequency = freqHz;
+        spreadingFactorController.text = spreadingFactor;
+        updateIntervalController.text = updateInterval;
 
-        terminalLines.add('> Scanned QR → groupId=$groupId freq=$freqHz');
+        terminalLines.add(
+          '> Scanned QR → groupId=$groupId freq=$freqHz sf=$spreadingFactor interval=$updateInterval',
+        );
       });
 
       applySettings();
@@ -285,7 +326,7 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
-              initialValue: selectedFrequency,
+              value: selectedFrequency,
               items: frequencies
                   .map((f) => DropdownMenuItem(value: f, child: Text(f)))
                   .toList(),
@@ -294,6 +335,26 @@ class _HomePageState extends State<HomePage> {
                 labelText: 'Frequency (Hz)',
                 border: OutlineInputBorder(),
               ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: spreadingFactorController,
+              decoration: const InputDecoration(
+                labelText: 'Spreading Factor',
+                hintText: 'e.g. 10',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: updateIntervalController,
+              decoration: const InputDecoration(
+                labelText: 'Update Interval (seconds)',
+                hintText: 'e.g. 60',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.number,
             ),
             const SizedBox(height: 12),
             ElevatedButton.icon(
