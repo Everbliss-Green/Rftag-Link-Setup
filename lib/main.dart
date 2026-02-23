@@ -43,12 +43,10 @@ class _HomePageState extends State<HomePage> {
   final List<String> frequencies = ['923875000', '923375000', '924875000'];
   String selectedFrequency = '923875000';
 
-  final TextEditingController spreadingFactorController = TextEditingController(
-    text: '10',
-  );
-  final TextEditingController updateIntervalController = TextEditingController(
-    text: '60',
-  );
+  final TextEditingController spreadingFactorController =
+      TextEditingController();
+  final TextEditingController updateIntervalController =
+      TextEditingController();
 
   String status = 'Not connected';
 
@@ -172,22 +170,48 @@ class _HomePageState extends State<HomePage> {
     final updateInterval = updateIntervalController.text.trim();
 
     try {
+      setState(() => terminalLines.add('> Sending commands with QR values...'));
+
       await _write('\r\n');
       await Future.delayed(const Duration(milliseconds: 150));
 
+      setState(
+        () => terminalLines.add('> CMD: rftag settings groupid set $groupId'),
+      );
       await _write('rftag settings groupid set $groupId\r\n');
       await Future.delayed(const Duration(milliseconds: 150));
 
+      setState(
+        () => terminalLines.add(
+          '> CMD: rftag settings lora freq $selectedFrequency',
+        ),
+      );
       await _write('rftag settings lora freq $selectedFrequency\r\n');
       await Future.delayed(const Duration(milliseconds: 150));
 
       if (spreadingFactor.isNotEmpty) {
+        setState(
+          () => terminalLines.add(
+            '> CMD: rftag settings lora sf $spreadingFactor',
+          ),
+        );
         await _write('rftag settings lora sf $spreadingFactor\r\n');
         await Future.delayed(const Duration(milliseconds: 150));
+      } else {
+        setState(() => terminalLines.add('> SKIP: SF not provided in QR'));
       }
 
       if (updateInterval.isNotEmpty) {
+        setState(
+          () => terminalLines.add(
+            '> CMD: rftag settings timing interval $updateInterval',
+          ),
+        );
         await _write('rftag settings timing interval $updateInterval\r\n');
+      } else {
+        setState(
+          () => terminalLines.add('> SKIP: Interval not provided in QR'),
+        );
       }
 
       setState(() => status = 'Commands sent');
