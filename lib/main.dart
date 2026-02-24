@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -174,7 +175,27 @@ class _HomePageState extends State<HomePage> {
 
       await _write('\r\n');
       await Future.delayed(const Duration(milliseconds: 150));
+      // set the rftag group id to a random value first
 
+      // Generate a random 8-digit number (10000000 to 99999999)
+      final randomGroupId =
+          (Random().nextDouble() * 90000000).floor() + 10000000;
+      setState(() {
+        terminalLines.add('> CMD: rftag settings groupid set $randomGroupId');
+      });
+      await _write('rftag settings groupid set $randomGroupId\r\n');
+      await Future.delayed(const Duration(milliseconds: 150));
+      setState(() => terminalLines.add('> CMD: rftag loc clear_history'));
+      await _write('rftag loc clear_history\r\n');
+      await Future.delayed(const Duration(milliseconds: 150));
+
+      // add this command rftag msg incoming clear
+      setState(() => terminalLines.add('> CMD: rftag msg incoming clear'));
+      await _write('rftag msg incoming clear\r\n');
+      await Future.delayed(const Duration(milliseconds: 150));
+      setState(() => terminalLines.add('> CMD: rftag msg outgoing clear'));
+      await _write('rftag msg outgoing clear\r\n');
+      await Future.delayed(const Duration(milliseconds: 150));
       setState(
         () => terminalLines.add('> CMD: rftag settings groupid set $groupId'),
       );
@@ -214,9 +235,10 @@ class _HomePageState extends State<HomePage> {
           () => terminalLines.add('> SKIP: Interval not provided in QR'),
         );
       }
+      // add last command kernel reboot cold
+      setState(() => terminalLines.add('> CMD: kernel reboot cold'));
 
-      setState(() => terminalLines.add('> CMD: rftag loc clear_history'));
-      await _write('rftag loc clear_history\r\n');
+      await _write('kernel reboot cold\r\n');
 
       setState(() => status = 'Commands sent');
     } catch (_) {
