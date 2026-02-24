@@ -208,11 +208,15 @@ class _HomePageState extends State<HomePage> {
           ),
         );
         await _write('rftag settings timing interval $updateInterval\r\n');
+        await Future.delayed(const Duration(milliseconds: 150));
       } else {
         setState(
           () => terminalLines.add('> SKIP: Interval not provided in QR'),
         );
       }
+
+      setState(() => terminalLines.add('> CMD: rftag loc clear_history'));
+      await _write('rftag loc clear_history\r\n');
 
       setState(() => status = 'Commands sent');
     } catch (_) {
