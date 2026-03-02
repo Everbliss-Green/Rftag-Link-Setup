@@ -308,25 +308,52 @@ class _HomePageState extends State<HomePage> {
         );
       }
 
-      // Execute commands sequentially
+      // Execute commands sequentially and count successes
+      int successCount = 0;
+      int failedCount = 0;
+      final int totalCommands = commands.length;
+
       for (final cmd in commands) {
         final result = await _sendCommand(cmd.command, cmd.successPattern);
         if (!result.success) {
+          failedCount++;
           setState(() {
             terminalLines.add('> FAILED: ${cmd.command}');
             terminalLines.add('> Response: ${result.response}');
             status = 'Command failed: ${cmd.command}';
           });
+          // Print summary before returning on failure
+          setState(() {
+            terminalLines.add('');
+            terminalLines.add(
+              '> ✓ Success: $successCount | ✗ Failed: $failedCount | Total: $totalCommands',
+            );
+            terminalLines.add('> ✗ Failed command: ${cmd.command}');
+            terminalLines.add('');
+          });
           return; // Stop on failure
         }
+        successCount++;
         setState(() => terminalLines.add('> OK: ${result.response}'));
       }
+
+      // Print success count summary (not counting kernel reboot)
+      setState(() {
+        terminalLines.add('');
+        terminalLines.add(
+          '> ✓ Success: $successCount/$totalCommands commands completed successfully',
+        );
+        terminalLines.add('');
+      });
 
       // Reboot command - send without waiting (device will reboot)
       setState(() => terminalLines.add('> CMD: kernel reboot cold'));
       await _writeRaw('kernel reboot cold\r\n');
 
-      setState(() => status = 'All commands sent successfully');
+      setState(
+        () => status =
+            'All commands sent successfully ($successCount/$totalCommands OK)',
+      );
     } catch (e) {
       setState(() => status = 'Failed to send commands: $e');
     }
