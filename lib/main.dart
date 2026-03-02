@@ -34,6 +34,14 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
+/// Expected success responses from firmware for each command
+class CommandExpectation {
+  final String command;
+  final String successPattern; // Exact substring to look for in response
+
+  const CommandExpectation(this.command, this.successPattern);
+}
+
 class _HomePageState extends State<HomePage> {
   SerialPort? _port;
   bool _keepReading = false;
@@ -53,6 +61,10 @@ class _HomePageState extends State<HomePage> {
 
   late final MobileScannerController _scannerController;
 
+  // Stream controller for serial responses
+  final StreamController<String> _responseController =
+      StreamController<String>.broadcast();
+
   @override
   void initState() {
     super.initState();
@@ -67,6 +79,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    _responseController.close();
     _scannerController.dispose();
     groupIdController.dispose();
     spreadingFactorController.dispose();
@@ -123,6 +136,9 @@ class _HomePageState extends State<HomePage> {
                 RegExp(r'\x1B\[[0-9;]*[A-Za-z]'),
                 '',
               );
+              if (clean.trim().isNotEmpty) {
+                _responseController.add(clean);
+              }
               setState(() => terminalLines.add(clean));
             }
           }
@@ -136,9 +152,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   // -----------------------------
-  // WRITE SERIAL
+  // WRITE SERIAL (raw, no logging)
   // -----------------------------
-  Future<void> _write(String text) async {
+  Future<void> _writeRaw(String text) async {
     final port = _port;
     if (port == null) return;
 
@@ -148,8 +164,61 @@ class _HomePageState extends State<HomePage> {
     await writer.write(Uint8List.fromList(text.codeUnits).toJS).toDart;
     await writer.close().toDart;
     writer.releaseLock();
+  }
 
-    setState(() => terminalLines.add('> $text'.trim()));
+  // -----------------------------
+  // SEND COMMAND AND WAIT FOR EXPECTED RESPONSE
+  // -----------------------------
+  Future<({bool success, String response})> _sendCommand(
+    String command,
+    String expectedSuccessPattern, {
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    final port = _port;
+    if (port == null) {
+      return (success: false, response: 'No port connected');
+    }
+
+    final completer = Completer<({bool success, String response})>();
+    final responses = <String>[];
+
+    // Listen for response lines
+    final subscription = _responseController.stream.listen((line) {
+      responses.add(line);
+
+      // Check for the exact expected success pattern from firmware
+      if (line.contains(expectedSuccessPattern)) {
+        if (!completer.isCompleted) {
+          completer.complete((success: true, response: line));
+        }
+      }
+      // Check for error pattern: "(rc=-" indicates failure
+      else if (line.contains('(rc=-')) {
+        if (!completer.isCompleted) {
+          completer.complete((success: false, response: line));
+        }
+      }
+    });
+
+    // Log and send the command
+    setState(() => terminalLines.add('> CMD: $command'));
+    await _writeRaw('$command\r\n');
+
+    // Wait for response or timeout
+    try {
+      final result = await completer.future.timeout(
+        timeout,
+        onTimeout: () {
+          return (
+            success: false,
+            response: responses.isEmpty ? 'Timeout' : responses.join('\n'),
+          );
+        },
+      );
+      return result;
+    } finally {
+      await subscription.cancel();
+    }
   }
 
   // -----------------------------
@@ -171,78 +240,95 @@ class _HomePageState extends State<HomePage> {
     final updateInterval = updateIntervalController.text.trim();
 
     try {
-      setState(() => terminalLines.add('> Sending commands with QR values...'));
+      setState(() {
+        status = 'Sending commands...';
+        terminalLines.add('> Sending commands with QR values...');
+      });
 
-      await _write('\r\n');
-      await Future.delayed(const Duration(milliseconds: 150));
-      // set the rftag group id to a random value first
+      // Wake up the terminal
+      await _writeRaw('\r\n');
+      await Future.delayed(const Duration(milliseconds: 100));
 
       // Generate a random 8-digit number (10000000 to 99999999)
       final randomGroupId =
           (Random().nextDouble() * 90000000).floor() + 10000000;
-      setState(() {
-        terminalLines.add('> CMD: rftag settings groupid set $randomGroupId');
-      });
-      await _write('rftag settings groupid set $randomGroupId\r\n');
-      await Future.delayed(const Duration(milliseconds: 150));
-      setState(() => terminalLines.add('> CMD: rftag loc clear_history'));
-      await _write('rftag loc clear_history\r\n');
-      await Future.delayed(const Duration(milliseconds: 150));
 
-      // add this command rftag msg incoming clear
-      setState(() => terminalLines.add('> CMD: rftag msg incoming clear'));
-      await _write('rftag msg incoming clear\r\n');
-      await Future.delayed(const Duration(milliseconds: 150));
-      setState(() => terminalLines.add('> CMD: rftag msg outgoing clear'));
-      await _write('rftag msg outgoing clear\r\n');
-      await Future.delayed(const Duration(milliseconds: 150));
-      setState(
-        () => terminalLines.add('> CMD: rftag settings groupid set $groupId'),
-      );
-      await _write('rftag settings groupid set $groupId\r\n');
-      await Future.delayed(const Duration(milliseconds: 150));
+      // Command list with exact expected success patterns from firmware:
+      // - "Group ID set to:" from settings_shell.c line 338
+      // - "Location history cleared" from location_repo_shell.c line 396
+      // - "Incoming messages cleared" from message_repo_shell.c line 169
+      // - "Outgoing messages cleared" from message_repo_shell.c line 277
+      // - "Frequency set to:" from settings_shell.c line 451
+      // - "Spreading factor set to:" from settings_shell.c line 529
+      // - "location_update_interval set to:" from settings_shell.c line 1099
 
-      setState(
-        () => terminalLines.add(
-          '> CMD: rftag settings lora freq $selectedFrequency',
+      final commands = <CommandExpectation>[
+        CommandExpectation(
+          'rftag settings groupid set $randomGroupId',
+          'Group ID set to:',
         ),
-      );
-      await _write('rftag settings lora freq $selectedFrequency\r\n');
-      await Future.delayed(const Duration(milliseconds: 150));
+        CommandExpectation(
+          'rftag loc clear_history',
+          'Location history cleared',
+        ),
+        CommandExpectation(
+          'rftag msg incoming clear',
+          'Incoming messages cleared',
+        ),
+        CommandExpectation(
+          'rftag msg outgoing clear',
+          'Outgoing messages cleared',
+        ),
+        CommandExpectation(
+          'rftag settings groupid set $groupId',
+          'Group ID set to:',
+        ),
+        CommandExpectation(
+          'rftag settings lora freq $selectedFrequency',
+          'Frequency set to:',
+        ),
+      ];
 
+      // Add optional commands
       if (spreadingFactor.isNotEmpty) {
-        setState(
-          () => terminalLines.add(
-            '> CMD: rftag settings lora sf $spreadingFactor',
+        commands.add(
+          CommandExpectation(
+            'rftag settings lora sf $spreadingFactor',
+            'Spreading factor set to:',
           ),
         );
-        await _write('rftag settings lora sf $spreadingFactor\r\n');
-        await Future.delayed(const Duration(milliseconds: 150));
-      } else {
-        setState(() => terminalLines.add('> SKIP: SF not provided in QR'));
       }
 
       if (updateInterval.isNotEmpty) {
-        setState(
-          () => terminalLines.add(
-            '> CMD: rftag settings timing interval $updateInterval',
+        commands.add(
+          CommandExpectation(
+            'rftag settings timing interval $updateInterval',
+            'location_update_interval set to:',
           ),
         );
-        await _write('rftag settings timing interval $updateInterval\r\n');
-        await Future.delayed(const Duration(milliseconds: 150));
-      } else {
-        setState(
-          () => terminalLines.add('> SKIP: Interval not provided in QR'),
-        );
       }
-      // add last command kernel reboot cold
+
+      // Execute commands sequentially
+      for (final cmd in commands) {
+        final result = await _sendCommand(cmd.command, cmd.successPattern);
+        if (!result.success) {
+          setState(() {
+            terminalLines.add('> FAILED: ${cmd.command}');
+            terminalLines.add('> Response: ${result.response}');
+            status = 'Command failed: ${cmd.command}';
+          });
+          return; // Stop on failure
+        }
+        setState(() => terminalLines.add('> OK: ${result.response}'));
+      }
+
+      // Reboot command - send without waiting (device will reboot)
       setState(() => terminalLines.add('> CMD: kernel reboot cold'));
+      await _writeRaw('kernel reboot cold\r\n');
 
-      await _write('kernel reboot cold\r\n');
-
-      setState(() => status = 'Commands sent');
-    } catch (_) {
-      setState(() => status = 'Failed to send commands');
+      setState(() => status = 'All commands sent successfully');
+    } catch (e) {
+      setState(() => status = 'Failed to send commands: $e');
     }
   }
 
