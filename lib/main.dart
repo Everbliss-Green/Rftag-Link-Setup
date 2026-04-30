@@ -56,6 +56,8 @@ class _HomePageState extends State<HomePage> {
       TextEditingController();
   final TextEditingController updateIntervalController =
       TextEditingController();
+  final TextEditingController usernameController = TextEditingController();
+  bool randomUsernameEnabled = false;
 
   String status = 'Not connected';
 
@@ -64,6 +66,134 @@ class _HomePageState extends State<HomePage> {
   // Stream controller for serial responses
   final StreamController<String> _responseController =
       StreamController<String>.broadcast();
+
+  String _generateRandomUsername() {
+    const prefixes = [
+      'tag',
+      'ranger',
+      'trail',
+      'summit',
+      'ember',
+      'scout',
+      'nova',
+      'echo',
+      'atlas',
+      'pixel',
+      'orbit',
+      'quantum',
+      'lunar',
+      'solar',
+      'storm',
+      'frost',
+      'blaze',
+      'drift',
+      'shadow',
+      'vivid',
+      'rapid',
+      'wild',
+      'alpha',
+      'bravo',
+      'charlie',
+      'delta',
+      'vector',
+      'zen',
+      'turbo',
+      'neon',
+      'sage',
+      'cobalt',
+      'ruby',
+      'onyx',
+      'jade',
+      'amber',
+      'iron',
+      'steel',
+      'titan',
+      'cosmo',
+      'zenith',
+      'apex',
+      'rift',
+      'pulse',
+      'comet',
+      'glider',
+      'terra',
+      'aero',
+      'radar',
+      'signal',
+      'cipher',
+      'phantom',
+      'spectra',
+      'aurora',
+      'ember',
+      'sparrow',
+      'falconer',
+    ];
+    const suffixes = [
+      'fox',
+      'hawk',
+      'bear',
+      'wolf',
+      'lynx',
+      'orca',
+      'otter',
+      'falcon',
+      'eagle',
+      'panther',
+      'tiger',
+      'viper',
+      'cobra',
+      'raven',
+      'sparrow',
+      'heron',
+      'badger',
+      'buffalo',
+      'yak',
+      'bison',
+      'rhino',
+      'jaguar',
+      'puma',
+      'cougar',
+      'shark',
+      'marlin',
+      'ray',
+      'kraken',
+      'whale',
+      'dolphin',
+      'seal',
+      'walrus',
+      'moose',
+      'stag',
+      'mammoth',
+      'griffin',
+      'phoenix',
+      'dragon',
+      'hydra',
+      'pegasus',
+      'saber',
+      'hammer',
+      'anvil',
+      'bolt',
+      'arrow',
+      'blade',
+      'shield',
+      'beacon',
+      'anchor',
+      'rocket',
+      'meteor',
+      'saturn',
+      'neptune',
+      'mars',
+      'venus',
+      'pluto',
+      'comet',
+      'nova',
+      'zen',
+    ];
+
+    final prefix = prefixes[Random().nextInt(prefixes.length)];
+    final suffix = suffixes[Random().nextInt(suffixes.length)];
+    final number = 100 + Random().nextInt(900);
+    return '$prefix-$suffix-$number';
+  }
 
   @override
   void initState() {
@@ -84,6 +214,7 @@ class _HomePageState extends State<HomePage> {
     groupIdController.dispose();
     spreadingFactorController.dispose();
     updateIntervalController.dispose();
+    usernameController.dispose();
     super.dispose();
   }
 
@@ -238,6 +369,15 @@ class _HomePageState extends State<HomePage> {
 
     final spreadingFactor = spreadingFactorController.text.trim();
     final updateInterval = updateIntervalController.text.trim();
+    String username = usernameController.text.trim();
+
+    if (randomUsernameEnabled) {
+      username = _generateRandomUsername();
+      setState(() {
+        usernameController.text = username;
+        terminalLines.add('> Random username generated: $username');
+      });
+    }
 
     try {
       setState(() {
@@ -304,6 +444,15 @@ class _HomePageState extends State<HomePage> {
           CommandExpectation(
             'rftag settings timing interval $updateInterval',
             'location_update_interval set to:',
+          ),
+        );
+      }
+
+      if (username.isNotEmpty) {
+        commands.add(
+          CommandExpectation(
+            'rftag settings username set $username',
+            'Username set to:',
           ),
         );
       }
@@ -518,6 +667,35 @@ class _HomePageState extends State<HomePage> {
                 border: OutlineInputBorder(),
               ),
               keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: usernameController,
+              enabled: !randomUsernameEnabled,
+              decoration: const InputDecoration(
+                labelText: 'Username (optional)',
+                hintText: 'e.g. Alice',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              onPressed: () {
+                setState(() {
+                  randomUsernameEnabled = !randomUsernameEnabled;
+                  if (randomUsernameEnabled) {
+                    usernameController.text = _generateRandomUsername();
+                  }
+                });
+              },
+              icon: Icon(
+                randomUsernameEnabled ? Icons.shuffle_on : Icons.shuffle,
+              ),
+              label: Text(
+                randomUsernameEnabled
+                    ? 'Random Username: ON'
+                    : 'Random Username: OFF',
+              ),
             ),
             const SizedBox(height: 12),
             ElevatedButton.icon(
