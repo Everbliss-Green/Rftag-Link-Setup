@@ -11,6 +11,54 @@ import 'package:web/web.dart' as web;
 import 'package:serial/serial.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+// -----------------------------
+// LoRa FREQUENCY CONFIG
+// Mirrors rftag_app/lib/utils/country_frequency_config.dart so the frequency
+// options offered here stay in sync with the app's LoRa config. Keep these in
+// lockstep with that file if the app's channel plan ever changes.
+// -----------------------------
+
+/// Supported countries/regions for LoRa configuration.
+const List<String> supportedCountries = ['CN', 'EU', 'JP', 'TW', 'US'];
+
+/// Default country fallback (Taiwan).
+const String defaultCountry = 'TW';
+
+/// Default channel numbers by country (correspond to safe frequencies).
+const Map<String, int> defaultChannelByCountry = {
+  'CN': 81, // 486.3 MHz
+  'US': 26, // 915.0 MHz
+  'TW': 41, // 922.5 MHz
+  'EU': 1, //  869.525 MHz
+  'JP': 26, // 922.15 MHz
+};
+
+/// Frequency configurations per country (channel number + frequency in MHz).
+/// CN: 470.3-489.3 MHz, 200 kHz spacing, channels 1-96 (CN470 band)
+/// EU: 869.525 MHz, single channel
+/// TW: 920.5-924.5 MHz, 500 kHz spacing, channels 37-45
+/// US: 902.5-927.5 MHz, 500 kHz spacing, channels 1-51
+/// JP: 920.65-923.4 MHz, 250 kHz spacing, channels 20-31
+Map<String, List<Map<String, dynamic>>> getCountryFrequencyConfig() => {
+  'CN': List.generate(96, (i) {
+    // Round to 3 decimals to avoid floating point precision issues.
+    final freq = ((470.3 + i * 0.2) * 1000).round() / 1000;
+    return {'channel': i + 1, 'frequency': freq};
+  }),
+  'EU': [
+    {'channel': 1, 'frequency': 869.525},
+  ],
+  'TW': List.generate(9, (i) {
+    return {'channel': i + 37, 'frequency': 920.5 + i * 0.5};
+  }),
+  'US': List.generate(51, (i) {
+    return {'channel': i + 1, 'frequency': 902.5 + i * 0.5};
+  }),
+  'JP': List.generate(12, (i) {
+    return {'channel': i + 20, 'frequency': 920.65 + i * 0.25};
+  }),
+};
+
 void main() {
   runApp(const MyApp());
 }
@@ -49,8 +97,8 @@ class _HomePageState extends State<HomePage> {
   final TextEditingController groupIdController = TextEditingController();
   final List<String> terminalLines = [];
 
-  final List<String> frequencies = ['923875000', '923375000', '924875000'];
-  String selectedFrequency = '923875000';
+  String selectedCountry = defaultCountry;
+  int selectedChannel = defaultChannelByCountry[defaultCountry]!;
 
   final TextEditingController spreadingFactorController =
       TextEditingController();
@@ -193,6 +241,43 @@ class _HomePageState extends State<HomePage> {
     final suffix = suffixes[Random().nextInt(suffixes.length)];
     final number = 100 + Random().nextInt(900);
     return '$prefix-$suffix-$number';
+  }
+
+  // -----------------------------
+  // FREQUENCY HELPERS
+  // -----------------------------
+  /// Channels available for the currently selected country.
+  List<Map<String, dynamic>> get _currentFrequencies =>
+      getCountryFrequencyConfig()[selectedCountry] ??
+      getCountryFrequencyConfig()[defaultCountry]!;
+
+  /// The selected channel's frequency converted to Hz for the firmware command
+  /// (e.g. 922.5 MHz -> 922500000).
+  int get _selectedFrequencyHz {
+    final freqs = _currentFrequencies;
+    final match = freqs.firstWhere(
+      (f) => f['channel'] == selectedChannel,
+      orElse: () => freqs.first,
+    );
+    final mhz = (match['frequency'] as num).toDouble();
+    return (mhz * 1000000).round();
+  }
+
+  /// Finds the country + channel whose frequency (MHz) matches [freqMHz], or
+  /// null if no channel in any region matches. Used to resolve QR payloads that
+  /// only carry a raw frequency.
+  ({String country, int channel})? _findCountryChannelForFrequency(
+    double freqMHz,
+  ) {
+    final config = getCountryFrequencyConfig();
+    for (final country in supportedCountries) {
+      for (final f in config[country]!) {
+        if (((f['frequency'] as num).toDouble() - freqMHz).abs() < 0.001) {
+          return (country: country, channel: f['channel'] as int);
+        }
+      }
+    }
+    return null;
   }
 
   @override
@@ -424,7 +509,7 @@ class _HomePageState extends State<HomePage> {
           'Group ID set to:',
         ),
         CommandExpectation(
-          'rftag settings lora freq $selectedFrequency',
+          'rftag settings lora freq $_selectedFrequencyHz',
           'Frequency set to:',
         ),
       ];
@@ -567,9 +652,50 @@ class _HomePageState extends State<HomePage> {
 
       final loraConfig = data['loraConfig'] as Map<String, dynamic>?;
 
-      final double freqMHz =
-          (loraConfig?['frequency'] as num?)?.toDouble() ?? 923.875;
-      final String freqHz = (freqMHz * 1000000).round().toString();
+      // Resolve country + channel from the QR so the selection matches the app.
+      // The app's QR payload carries country + channel + frequency; older
+      // payloads may only have a raw frequency, which we map back to a channel.
+      final config = getCountryFrequencyConfig();
+      String? country;
+      int? channel;
+
+      final countryVal = loraConfig?['country'];
+      if (countryVal is String && (config[countryVal]?.isNotEmpty ?? false)) {
+        country = countryVal;
+      }
+
+      final channelVal = loraConfig?['channel'];
+      final freqRaw = loraConfig?['frequency'];
+      final double? freqMHz = freqRaw is num ? freqRaw.toDouble() : null;
+
+      if (country != null) {
+        // Country known: resolve the channel within that country's plan.
+        final freqs = config[country]!;
+        if (channelVal is num &&
+            freqs.any((f) => f['channel'] == channelVal.toInt())) {
+          channel = channelVal.toInt();
+        } else if (freqMHz != null) {
+          final m = freqs.firstWhere(
+            (f) => ((f['frequency'] as num).toDouble() - freqMHz).abs() < 0.001,
+            orElse: () => const <String, dynamic>{},
+          );
+          if (m.isNotEmpty) channel = m['channel'] as int;
+        }
+        channel ??=
+            defaultChannelByCountry[country] ?? freqs.first['channel'] as int;
+      } else if (freqMHz != null) {
+        // No country in payload: find any region whose channel matches.
+        final match = _findCountryChannelForFrequency(freqMHz);
+        if (match != null) {
+          country = match.country;
+          channel = match.channel;
+        }
+      }
+
+      country ??= defaultCountry;
+      channel ??=
+          defaultChannelByCountry[country] ??
+          config[country]!.first['channel'] as int;
 
       // Parse spreading factor - handle both "SF10" format and numeric 10
       String spreadingFactor = '10';
@@ -588,16 +714,15 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         groupIdController.text = groupId;
 
-        if (!frequencies.contains(freqHz)) {
-          frequencies.add(freqHz);
-        }
-
-        selectedFrequency = freqHz;
+        selectedCountry = country!;
+        selectedChannel = channel!;
         spreadingFactorController.text = spreadingFactor;
         updateIntervalController.text = updateInterval;
 
         terminalLines.add(
-          '> Scanned QR → groupId=$groupId freq=$freqHz sf=$spreadingFactor interval=$updateInterval',
+          '> Scanned QR → groupId=$groupId country=$country '
+          'CH$channel ($_selectedFrequencyHz Hz) sf=$spreadingFactor '
+          'interval=$updateInterval',
         );
       });
 
@@ -638,13 +763,32 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
-              value: selectedFrequency,
-              items: frequencies
-                  .map((f) => DropdownMenuItem(value: f, child: Text(f)))
+              value: selectedCountry,
+              items: supportedCountries
+                  .map((c) => DropdownMenuItem(value: c, child: Text(c)))
                   .toList(),
-              onChanged: (v) => setState(() => selectedFrequency = v!),
+              onChanged: (v) => setState(() {
+                selectedCountry = v!;
+                selectedChannel = _currentFrequencies.first['channel'] as int;
+              }),
               decoration: const InputDecoration(
-                labelText: 'Frequency (Hz)',
+                labelText: 'Country / Region',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(
+              value: selectedChannel,
+              items: _currentFrequencies.map((f) {
+                final freq = (f['frequency'] as num).toStringAsFixed(3);
+                return DropdownMenuItem<int>(
+                  value: f['channel'] as int,
+                  child: Text('CH${f['channel']} - $freq MHz'),
+                );
+              }).toList(),
+              onChanged: (v) => setState(() => selectedChannel = v!),
+              decoration: const InputDecoration(
+                labelText: 'Frequency Channel',
                 border: OutlineInputBorder(),
               ),
             ),
